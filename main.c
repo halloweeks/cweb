@@ -6,14 +6,17 @@
 #include <regex.h>
 #include <stdbool.h>
 #include <sys/stat.h>
+#include <signal.h>
+
 
 #define PORT 8080
-#define BUFFER_SIZE 5242880 // 5MB
-#define DEFAULT_PAGE "index.html" // Default page file path
+#define BUFFER_SIZE 65536 // 64KB
+#define MAX_HEADER_SIZE 32768 // 32KB
+#define DEFAULT_PAGE "index.html"
 
 int _readline(int fd, char *buffer, size_t size) {
 	int index = 0;
-	char r = -1;
+	int r = -1;
 	char ch;
 	
 	while (size--) {
@@ -90,21 +93,18 @@ void process_request(int new_socket) {
 	
 	int REQUEST_METHOD = -1;
 	
-	const char *GET_PATTERN = "^GET /([^ ?]*)\?([^ ]*) HTTP/1";
-	const char *POST_PATTERN = "^POST /([^ ]*) HTTP/1";
-	const char *POST_CONTENT_PATTERN = "\r\n\r\n(.*)"; // Capture everything after \r\n\r\n
 	
-	if (regcomp(&regex_get, GET_PATTERN, REG_EXTENDED) != 0) {
+	if (regcomp(&regex_get, "^GET /([^ ?]*)\?([^ ]*) HTTP/1", REG_EXTENDED) != 0) {
 		fprintf(stderr, "Could not compile regex\n");
 		return;
 	}
 	
-	if (regcomp(&regex_post, POST_PATTERN, REG_EXTENDED) != 0) {
+	if (regcomp(&regex_post, "^POST /([^ ]*) HTTP/1", REG_EXTENDED) != 0) {
 		fprintf(stderr, "Could not compile regex\n");
 		return;
 	}
 	
-	if (regcomp(&data, POST_CONTENT_PATTERN, REG_EXTENDED) != 0) {
+	if (regcomp(&data, "\r\n\r\n(.*)", REG_EXTENDED) != 0) {
 		fprintf(stderr, "Could not compile regex\n");
 		return;
 	}
@@ -121,10 +121,7 @@ void process_request(int new_socket) {
 		return;
 	}
 	
-	if (request_method(buffer) == GET) {
-		
-	}
-	
+
 	printf("\n\nReceived request:\n%s\n\n", buffer);
 	
 	if (regexec(&regex_get, buffer, 3, pmatch, 0) == 0) {
@@ -198,7 +195,156 @@ void process_request(int new_socket) {
 	free(buffer);
 }
 
+#define DATA_SIZE 52428800 // 50MB
+
+
+long long file_size(const char *filename) {
+	struct stat st;
+	
+	if (stat(filename, &st) != 0) {
+		return -1;
+	}
+	
+	return st.st_size;
+}
+
+void method_not_allowed(int socket) {
+	char data[1024];
+	
+	strcpy(data, "HTTP/1.1 405 Method Not Allowed\r\n");
+	strcat(data, "Content-Type: text/html\r\n");
+	strcat(data, "Connection: close\r\n");
+	strcat(data, "\r\n");
+	strcat(data, "<html><body><h1>405 Method Not Allowed</h1></body></html>");
+		
+	write(socket, data, strlen(data));
+	close(socket);
+}
+
+void _http_response(int socket, int code) {
+    char response[1024];
+
+    // Build the response based on the HTTP status code
+    switch (code) {
+        case 200:
+            strcpy(response, "HTTP/1.1 200 OK\r\n");
+            break;
+        case 201:
+            strcpy(response, "HTTP/1.1 201 Created\r\n");
+            break;
+        case 202:
+            strcpy(response, "HTTP/1.1 202 Accepted\r\n");
+            break;
+        case 204:
+            strcpy(response, "HTTP/1.1 204 No Content\r\n");
+            break;
+        case 400:
+            strcpy(response, "HTTP/1.1 400 Bad Request\r\n");
+            break;
+        case 401:
+            strcpy(response, "HTTP/1.1 401 Unauthorized\r\n");
+            break;
+        case 403:
+            strcpy(response, "HTTP/1.1 403 Forbidden\r\n");
+            break;
+        case 404:
+            strcpy(response, "HTTP/1.1 404 Not Found\r\n");
+            break;
+        case 500:
+            strcpy(response, "HTTP/1.1 500 Internal Server Error\r\n");
+            break;
+        case 503:
+            strcpy(response, "HTTP/1.1 503 Service Unavailable\r\n");
+            break;
+        // Add other cases as needed...
+        default:
+            strcpy(response, "HTTP/1.1 500 Internal Server Error\r\n");
+            break;
+    }
+
+    // Send the response
+    write(socket, response, strlen(response));
+}
+
+int _find(const char *str) {
+	for (int i = 0; str[i] != '\0'; i++) {
+		if (str[i] == '\r' && str[i+1] == '\n' && str[i+2] == '\r' && str[i+3] == '\n') {
+			return i + 4;
+		}
+	}
+	return -1;
+}
+
+int _header_length(int socket) {
+	char buffer[MAX_HEADER_SIZE]; // maximum 32kb data
+	
+	int r = recv(socket, buffer, sizeof(buffer), MSG_PEEK);
+	
+	if (r < 0) return -1;
+	
+	buffer[r] = '\0';
+	
+	return _find(buffer);
+}
+
+void handle(int socket) {
+	regex_t regex;
+	regmatch_t matches[3];
+	
+	char buffer[BUFFER_SIZE];
+	
+	int len = _header_length(socket);
+	
+	if (len == -1) {
+		_http_response(socket, 400);
+		strcpy(buffer, "Content-Type: text/html\r\n");
+		strcat(buffer, "Connection: close\r\n");
+		strcat(buffer, "\r\n");
+		strcat(buffer, "<html><body><h1>Bad request</h1></body></html>");
+		write(socket, buffer, strlen(buffer));
+		close(socket);
+		return;
+	}
+	
+	
+	read(socket, buffer, len);
+	
+	if (regcomp(&regex, "Content-Type: ([^;]+); boundary=([^\\s]+)", REG_EXTENDED) != 0) {
+		fprintf(stderr, "Could not compile regex\n");
+		return;
+	}
+    
+	
+	
+	
+	
+	printf("header size: %d\n", len);
+	printf("header data: %s\n", buffer);
+	
+	memset(buffer, 0, sizeof(buffer));
+	
+	
+	strcpy(buffer, "HTTP/1.1 200 OK\r\n");
+	strcat(buffer, "Content-Type: text/html\r\n");
+	strcat(buffer, "Connection: close\r\n");
+	strcat(buffer, "\r\n");
+	strcat(buffer, "<html><body><h1>hello</h1></body></html>");
+		
+	write(socket, buffer, strlen(buffer));
+	
+	close(socket);
+}
+
+
+
+void handle_sigint(int sig) {
+    printf("\nServer shutting down gracefully...\n");
+    exit(0);
+}
+
 int main() {
+	signal(SIGINT, handle_sigint); // Graceful shutdown on Ctrl+C
+	
     int server_fd, new_socket;
     struct sockaddr_in address;
     int opt = 1;
@@ -242,7 +388,7 @@ int main() {
         }
         
         // Process the request
-        process_request(new_socket);
+        handle(new_socket);
         
         // Close the socket
         close(new_socket);
